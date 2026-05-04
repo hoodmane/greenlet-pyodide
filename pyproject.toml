@@ -1,0 +1,17 @@
+[project]
+name = "greenlet-pyodide"
+version = "0.0.0.dev0"
+description = "Pyodide port of greenlet on top of pyodide.ffi.run_sync"
+requires-python = ">=3.10"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "greenlet>=3.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "pyodide: test requires the Pyodide runtime (uses pyodide.ffi)",
+]
