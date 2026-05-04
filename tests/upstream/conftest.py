@@ -85,15 +85,24 @@ _INDIVIDUAL_SKIPS = {
     "test_can_access_f_back_of_suspended_greenlet": "gr_frame not implemented in port",
     "test_get_stack_with_nested_c_calls": "gr_frame not implemented in port",
     "test_frames_always_exposed": "gr_frame not implemented in port",
-    # Broken / reentrant_switch tests need _greenlet internals
-    "test_failed_to_initialstub": "uses _greenlet capsule",
-    "test_failed_to_switch_into_running": "uses _greenlet capsule",
-    "test_failed_to_slp_switch_into_running": "uses _greenlet capsule",
-    "test_reentrant_switch_two_greenlets": "uses _greenlet capsule",
-    "test_reentrant_switch_three_greenlets": "uses _greenlet capsule",
-    "test_reentrant_switch_three_greenlets2": "uses _greenlet capsule",
-    "test_reentrant_switch_GreenletAlreadyStartedInPython": "uses _greenlet capsule",
-    "test_reentrant_switch_run_callable_has_del": "uses _greenlet capsule",
+    # ``UnswitchableGreenlet`` is a debug-only C subclass that lets the
+    # tests inject a failure point inside the assembly stack-switch
+    # routine. There's no analogue for our pure-Python implementation
+    # because we don't switch C stacks in the first place.
+    "test_failed_to_initialstub": "requires _greenlet.UnswitchableGreenlet",
+    "test_failed_to_switch_into_running": "requires _greenlet.UnswitchableGreenlet",
+    # Remaining "broken greenlet" tests drive subprocesses that run
+    # ``fail_*.py`` scripts. Those scripts exercise specific quirks of
+    # the C extension (slp_switch reentrancy, trace-hook reentrancy,
+    # etc.) and can't reasonably run under our port. The TestCase shim
+    # raises ``SkipTest`` from ``run_script`` so they self-skip at
+    # runtime, but listing them here keeps the suite output tidy.
+    "test_failed_to_slp_switch_into_running": "requires subprocess + assembly switch failure",
+    "test_reentrant_switch_two_greenlets": "requires subprocess + tracing reentrancy",
+    "test_reentrant_switch_three_greenlets": "requires subprocess + tracing reentrancy",
+    "test_reentrant_switch_three_greenlets2": "requires subprocess + tracing reentrancy",
+    "test_reentrant_switch_GreenletAlreadyStartedInPython": "requires subprocess + run-attribute reentrancy",
+    "test_reentrant_switch_run_callable_has_del": "requires subprocess + run-attribute reentrancy",
     # repr depends on internal state strings
     "test_main_while_running": "repr format differs in port",
     "test_main_in_background": "repr format differs in port",
@@ -106,8 +115,6 @@ _INDIVIDUAL_SKIPS = {
     "test_version": "port has its own version string",
     # __dict__ deletion semantics differ in pure-Python __slots__ form
     "test_instance_dict": "__dict__ deletion semantics differ in port",
-    # Reparenting on kill not implemented (pure-Python __del__ kill path)
-    "test_parent_restored_on_kill": "kill-time reparenting not modeled",
     # Deeply intertwined dealloc-during-switch test
     "test_dealloc_switch_args_not_lost": "complex dealloc-during-switch scenario",
     # Recursive startup via __getattribute__ on `run` is upstream-specific

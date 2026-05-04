@@ -372,30 +372,50 @@ class greenlet:
             return
         if current is self:
             return
+        # Upstream temporarily reparents the dying greenlet to the
+        # killer (the current greenlet) for the duration of the kill,
+        # then restores the original parent once the body has exited.
+        # That way the GreenletExit handler observes the killer as its
+        # parent and any unhandled exceptions propagate to the killer
+        # rather than the original parent.
+        original_parent = self._parent
+        if current is not original_parent:
+            try:
+                self._parent = current
+            except (AttributeError, ValueError, TypeError):
+                # Reparenting can fail (e.g. a cycle); if so, fall
+                # back to the original parent and proceed.
+                original_parent = None
         try:
-            _switch_to(self, (), {}, throw=GreenletExit())
-        except BaseException:  # noqa: BLE001 - swallow, like upstream
-            # Any exception that escapes here is unraisable; route it
-            # through ``sys.unraisablehook`` to match upstream.
             try:
-                hook = sys.unraisablehook
-            except AttributeError:  # pragma: no cover
-                return
+                _switch_to(self, (), {}, throw=GreenletExit())
+            except BaseException:  # noqa: BLE001 - swallow, like upstream
+                # Any exception that escapes here is unraisable; route
+                # it through ``sys.unraisablehook`` to match upstream.
+                try:
+                    hook = sys.unraisablehook
+                except AttributeError:  # pragma: no cover
+                    return
 
-            class _Unraisable:
-                __slots__ = ("exc_type", "exc_value", "exc_traceback",
-                             "err_msg", "object")
-            ur = _Unraisable()
-            exc = sys.exc_info()
-            ur.exc_type = exc[0]
-            ur.exc_value = exc[1]
-            ur.exc_traceback = exc[2]
-            ur.err_msg = None
-            ur.object = self
-            try:
-                hook(ur)
-            except Exception:  # pragma: no cover
-                pass
+                class _Unraisable:
+                    __slots__ = ("exc_type", "exc_value", "exc_traceback",
+                                 "err_msg", "object")
+                ur = _Unraisable()
+                exc = sys.exc_info()
+                ur.exc_type = exc[0]
+                ur.exc_value = exc[1]
+                ur.exc_traceback = exc[2]
+                ur.err_msg = None
+                ur.object = self
+                try:
+                    hook(ur)
+                except Exception:  # pragma: no cover
+                    pass
+        finally:
+            if original_parent is not None:
+                # Restore the original parent now that the body has
+                # finished executing.
+                self._parent = original_parent
 
 
 # ---------------------------------------------------------------------------
