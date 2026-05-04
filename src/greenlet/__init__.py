@@ -253,7 +253,11 @@ class greenlet:
     @parent.setter
     def parent(self, value: "greenlet") -> None:
         if not isinstance(value, greenlet):
-            raise TypeError("parent must be a greenlet")
+            # Match upstream's error message verbatim.
+            raise TypeError(
+                "GreenletChecker: Expected any type of greenlet, not "
+                + type(value).__name__
+            )
         if self._main:
             raise AttributeError(
                 "cannot set the parent of a main greenlet"
@@ -266,6 +270,11 @@ class greenlet:
             cur = cur._parent
         self._parent = value
 
+    @parent.deleter
+    def parent(self) -> None:
+        # Upstream forbids deletion with this exact message.
+        raise AttributeError("can't delete attribute")
+
     @property
     def dead(self) -> bool:
         return self._dead
@@ -273,6 +282,11 @@ class greenlet:
     @property
     def gr_frame(self):
         return self._gr_frame
+
+    def __bool__(self) -> bool:
+        # Upstream: a greenlet is truthy iff it is started and not
+        # dead (i.e. currently active or suspended).
+        return self._started and not self._dead
 
     # ---- copy / pickle protocol --------------------------------------
 
@@ -290,6 +304,11 @@ class greenlet:
 
     # ---- core operations ----------------------------------------------
 
+    @staticmethod
+    def getcurrent() -> "greenlet":
+        """Class-method form of :func:`greenlet.getcurrent`."""
+        return getcurrent()
+
     def switch(self, *args: Any, **kwargs: Any) -> Any:
         """Switch execution to this greenlet, returning when control comes back."""
         return _switch_to(self, args, kwargs, throw=None)
@@ -301,6 +320,8 @@ class greenlet:
         tb: Any = None,
     ) -> Any:
         """Switch to this greenlet and raise an exception inside it."""
+        import types as _types
+
         if isinstance(typ, BaseException):
             if val is not None:
                 raise TypeError(
@@ -312,15 +333,21 @@ class greenlet:
                 exc = typ()
             elif isinstance(val, tuple):
                 exc = typ(*val)
+            elif isinstance(val, BaseException):
+                exc = val
             else:
                 exc = typ(val)
         else:
-            raise TypeError("exceptions must derive from BaseException")
+            raise TypeError(
+                "exceptions must be classes, or instances, not "
+                + type(typ).__name__
+            )
         if tb is not None:
-            try:
-                exc = exc.with_traceback(tb)
-            except Exception:  # pragma: no cover - best effort
-                pass
+            if not isinstance(tb, _types.TracebackType):
+                raise TypeError(
+                    "throw() third argument must be a traceback object"
+                )
+            exc = exc.with_traceback(tb)
         return _switch_to(self, (), {}, throw=exc)
 
     # ---- finalization --------------------------------------------------
@@ -551,11 +578,19 @@ def _switch_to(
     if target is src:
         # After dead-greenlet fall-through we landed back on ourselves.
         if throw is not None:
+            # Upstream: throwing ``GreenletExit`` into an
+            # already-dead greenlet is "eaten" - it returns the
+            # exception as a value, mirroring an ordinary fall-off
+            # exit. Other exception types still propagate.
+            if isinstance(throw, GreenletExit):
+                return throw
             raise throw
         return _pack_switch_value(args, kwargs)
 
     # Validate the target has something to run on its first switch.
-    if not target._started and target._run is None and throw is None:
+    # Both ``switch`` and ``throw`` raise ``AttributeError`` here in
+    # upstream when the target has no ``run``.
+    if not target._started and target._run is None:
         raise AttributeError("run")
 
     # Allocate our own resume future *before* waking the target so that
@@ -622,6 +657,12 @@ def settrace(_callback: Any) -> None:  # noqa: D401
 
 def gettrace() -> None:
     return None
+
+
+# Expose the exceptions on the class itself so that downstream code can
+# write ``greenlet.greenlet.GreenletExit`` like in upstream.
+greenlet.GreenletExit = GreenletExit  # type: ignore[attr-defined]
+greenlet.error = error  # type: ignore[attr-defined]
 
 
 # Compatibility alias used by some downstream code.

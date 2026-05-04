@@ -36,7 +36,7 @@ import sys
 sys.path.insert(0, "/repo/src")
 
 import pytest
-pytest.main(${JSON.stringify(["-v", "-rA", "--color=yes", "--tb=short", ...args])})
+pytest.main(${JSON.stringify(["-v", "-rA", "--color=yes", "--tb=line", ...args])})
 `);
 
 process.exit(Number(exitCode) || 0);
