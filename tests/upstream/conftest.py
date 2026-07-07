@@ -44,13 +44,9 @@ _SKIP_MODULES = {
     # C-API extension interface
     "test_extension_interface.py",
     # gc slot / refcount leak / cleanup machinery from the C ext
-    "test_gc.py",
     "test_greenlet_trash.py",
     "test_leaks.py",
     "test_interpreter_shutdown.py",
-    # generator/weakref slots: implemented by the C ext, not us
-    "test_generator.py",
-    "test_generator_nested.py",
     # Internal stack-saved telemetry from the C ext
     "test_stack_saved.py",
     # Tracing not implemented
@@ -103,26 +99,18 @@ _INDIVIDUAL_SKIPS = {
     "test_reentrant_switch_three_greenlets2": "requires subprocess + tracing reentrancy",
     "test_reentrant_switch_GreenletAlreadyStartedInPython": "requires subprocess + run-attribute reentrancy",
     "test_reentrant_switch_run_callable_has_del": "requires subprocess + run-attribute reentrancy",
-    # repr depends on internal state strings
-    "test_main_while_running": "repr format differs in port",
-    "test_main_in_background": "repr format differs in port",
-    "test_initial": "repr format differs in port",
-    "test_dead": "repr format differs in port",
-    "test_formatting_produces_native_str": "repr format differs in port",
-    # MainGreenlet type subclassing relies on the C type
-    "test_main_greenlet_type_can_be_subclassed": "MainGreenlet C type not exposed",
     # version: we have a custom version
     "test_version": "port has its own version string",
-    # __dict__ deletion semantics differ in pure-Python __slots__ form
-    "test_instance_dict": "__dict__ deletion semantics differ in port",
-    # Deeply intertwined dealloc-during-switch test
-    "test_dealloc_switch_args_not_lost": "complex dealloc-during-switch scenario",
-    # Recursive startup via __getattribute__ on `run` is upstream-specific
-    "test_recursive_startup": "uses upstream-specific run= getattr trampoline",
-    # __getattribute__('run') intercept — port doesn't access `run` at switch time
-    "test_switch_to_dead_greenlet_with_unstarted_perverse_parent": (
-        "uses upstream-specific run= getattr trampoline"
-    ),
+    # A subclass that overrides ``__getattribute__`` to (a) raise on
+    # ``run`` access and (b) return ``None`` for every other name
+    # (including our internal ``_parent`` / ``_dead`` / ``_started``
+    # slots). Upstream reads those slots as C struct fields, bypassing
+    # user attribute hooks; our port does not, so ``_wake``'s parent
+    # walk sees ``None`` and can't route the SomeError back to the
+    # switch caller. Fixing this would require routing every internal
+    # slot access through ``object.__getattribute__``.
+    "test_switch_to_dead_greenlet_with_unstarted_perverse_parent":
+        "requires __getattribute__ transparency for internal slots",
     # contextvars: gr_context attribute not implemented
     "test_context_assignment_while_running": "gr_context not implemented",
     "test_context_assignment_wrong_type": "gr_context not implemented",

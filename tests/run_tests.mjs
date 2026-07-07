@@ -3,20 +3,16 @@
 // Usage:
 //   node --experimental-wasm-stack-switching tests/run_tests.mjs [pytest args...]
 
-import { loadPyodide } from "../../pyodide/dist/pyodide.mjs";
+import { loadPyodide } from "pyodide";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
-const pyodideDist = resolve(repoRoot, "../pyodide/dist");
 
 const userArgs = process.argv.slice(2);
 
-const pyodide = await loadPyodide({
-  indexURL: pyodideDist,
-  fullStdLib: false,
-});
+const pyodide = await loadPyodide();
 
 // Mount the repo into the in-memory FS so that `import greenlet`
 // resolves to our pure-Python implementation and pytest can collect

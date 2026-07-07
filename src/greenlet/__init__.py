@@ -46,9 +46,28 @@ Limitations
 from __future__ import annotations
 
 import asyncio
+import gc
 import sys
 import weakref
 from typing import Any, Callable, Dict, Optional, Tuple
+
+
+# Tracks whether a cycle-collection pass is currently in progress.
+# Populated via ``gc.callbacks`` below. ``__del__`` consults this to
+# avoid re-entering the greenlet switching machinery from cycle GC:
+# JSPI's ``run_sync`` returns spuriously when nested inside a cycle
+# collection pass, which would otherwise deadlock finalization.
+_gc_active: list = [False]
+
+
+def _gc_probe_callback(phase: str, info: dict) -> None:  # noqa: ARG001
+    if phase == "start":
+        _gc_active[0] = True
+    elif phase == "stop":
+        _gc_active[0] = False
+
+
+gc.callbacks.append(_gc_probe_callback)
 
 __all__ = [
     "__version__",
@@ -145,6 +164,35 @@ class _Throw:
         self.exc = exc
 
 
+def _resolve_run(target: "greenlet") -> Optional[Callable[..., Any]]:
+    """Look up the callable to run for a freshly-starting greenlet.
+
+    Upstream reads the ``run`` attribute at the first switch via normal
+    Python attribute access -- that means subclass ``__getattribute__``
+    hooks run and can have side effects (e.g. recursively switching
+    into the greenlet before it has officially "started"). We do the
+    same by calling :func:`getattr` on ``target``. If ``run`` is
+    absent (raises :class:`AttributeError`) we return ``None`` so the
+    caller can raise ``AttributeError("run")`` at the switch site,
+    matching upstream.
+
+    The base-class ``run`` property returns ``self._run`` when the
+    greenlet has not yet started, so ``getattr(target, 'run')``
+    naturally picks up:
+
+    * a ``run=`` keyword passed to ``__init__`` (stored in ``_run``),
+    * a subclass override that shadows the property (method / attr),
+    * anything a subclass ``__getattribute__`` chooses to return.
+    """
+    try:
+        result = getattr(target, "run")
+    except AttributeError:
+        return None
+    if result is None:
+        return None
+    return result
+
+
 def _pack_switch_value(args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
     """Encode the value a paused switch() should return.
 
@@ -192,6 +240,30 @@ class greenlet:
         "_gr_frame",
     )
 
+    def __new__(cls, *args: Any, **kwargs: Any) -> "greenlet":
+        # Initialise all slots in ``__new__`` so that subclasses that
+        # override ``__init__`` without calling ``super().__init__``
+        # still get a fully-formed instance. Upstream does the same in
+        # ``tp_new``. ``__init__`` may later overwrite ``_run`` and
+        # ``_parent`` from user-supplied arguments.
+        self = super().__new__(cls)
+        self._run = None
+        # Default parent is the current greenlet at instantiation
+        # time. Skip the lazy-main promotion when we're constructing
+        # the main greenlet itself (see :func:`_ensure_main`).
+        if cls is greenlet and _main is None:
+            self._parent = None
+        else:
+            self._parent = _ensure_main() if _current is None else _current
+        self._started = False
+        self._dead = False
+        self._resume_future = None
+        self._pending_value = None
+        self._task = None
+        self._main = False
+        self._gr_frame = None
+        return self
+
     def __init__(
         self,
         run: Optional[Callable[..., Any]] = None,
@@ -202,31 +274,44 @@ class greenlet:
             parent = getcurrent()
         elif not isinstance(parent, greenlet):
             raise TypeError("parent must be a greenlet")
-        self._parent: "greenlet | None" = parent
-        self._started = False
-        self._dead = False
-        self._resume_future: Optional[asyncio.Future] = None
-        self._pending_value: Any = None
-        self._task: Optional[asyncio.Task] = None
-        self._main = False
-        self._gr_frame = None
+        self._parent = parent
+
+    # ---- attribute deletion --------------------------------------------
+
+    def __delattr__(self, name: str) -> None:
+        # Upstream forbids deletion of ``__dict__`` (the instance
+        # attribute-storage dict) with a ``TypeError``. Match that.
+        if name == "__dict__":
+            raise TypeError("__dict__ may not be deleted")
+        super().__delattr__(name)
 
     # ---- repr ----------------------------------------------------------
 
     def __repr__(self) -> str:
-        cls = type(self).__name__
-        flags = []
-        if self._main:
-            flags.append("main")
+        # Mirror upstream ``green_repr`` in ``PyGreenlet.cpp``. Format:
+        #   Alive:  <TYPE object at 0xADDR (otid=0xTID)[ current| suspended][ active][ pending| started][ main]>
+        #   Dead:   <TYPE object at 0xADDR (otid=0xTID) dead>
+        # We are single-threaded, so ``otid`` is fixed at 0.
+        cls = type(self).__module__ + "." + type(self).__qualname__
+        addr = id(self)
+        tid = 0
         if self._dead:
-            flags.append("dead")
-        elif self._started:
-            flags.append("suspended")
-        else:
-            flags.append("pending")
+            return f"<{cls} object at 0x{addr:x} (otid=0x{tid:x}) dead>"
+        never_started = not self._started
+        parts = [f"<{cls} object at 0x{addr:x} (otid=0x{tid:x})"]
         if self is _current:
-            flags.append("current")
-        return f"<{cls} object at 0x{id(self):x} ({' '.join(flags)})>"
+            parts.append(" current")
+        elif self._started:
+            parts.append(" suspended")
+        # "active" == started and not dead. We've already ruled out
+        # dead above, so this is equivalent to ``self._started``.
+        if self._started:
+            parts.append(" active")
+        parts.append(" pending" if never_started else " started")
+        if self._main:
+            parts.append(" main")
+        parts.append(">")
+        return "".join(parts)
 
     # ---- properties ---------------------------------------------------
 
@@ -365,6 +450,21 @@ class greenlet:
             return
         if getattr(self, "_dead", True):
             return
+        # When ``__del__`` is invoked from Python's cycle GC pass, our
+        # ``_switch_to`` machinery cannot yield the wasm stack safely:
+        # JSPI's ``run_sync`` returns spuriously in that context (the
+        # exact interaction between cycle GC and PyodideFuture done
+        # callbacks is not fully understood). Rather than deadlock,
+        # simply mark the greenlet dead and skip the switch. This
+        # means the greenlet's ``finally`` clauses will NOT run for
+        # cycle-collected greenlets, which matches the documented
+        # "test_finalizer_crash" caveat in the upstream test suite.
+        if _gc_active[0] or sys.is_finalizing():
+            self._dead = True
+            self._started = True
+            self._run = None
+            self._task = None
+            return
         # Avoid running into our own destructor recursively.
         try:
             current = getcurrent()
@@ -445,6 +545,7 @@ def _ensure_main() -> "greenlet":
 
 async def _body(
     self_ref: "weakref.ref[greenlet]",
+    run: Optional[Callable[..., Any]],
     args: Tuple[Any, ...],
     kwargs: Dict[str, Any],
 ) -> None:
@@ -458,10 +559,14 @@ async def _body(
     only suspension points are the ``run_sync`` calls inside
     :func:`_switch_to`.
     """
+    global _current
     self = self_ref()
     if self is None:
         return
-    run = self._run
+    # We are the greenlet whose wasm stack is now executing Python code.
+    # ``_switch_to`` deliberately leaves ``_current`` pointing at the
+    # suspending greenlet until the resuming one takes over here.
+    _current = self
     # Don't keep a strong reference here either: the body is allowed to
     # outlive the greenlet object if the user's code holds onto a
     # closure that references it explicitly.
@@ -549,12 +654,20 @@ def _wake(
                 raise exc
             _wake(parent, exc=exc)
             return
+        # Resolve ``run`` via normal attribute lookup. This honors any
+        # subclass ``__getattribute__`` hook and may re-enter our
+        # switching machinery. If it returns ``None`` (no ``run``),
+        # ``_body`` raises ``AttributeError("run")`` and delivers it
+        # to the parent.
+        run = _resolve_run(target)
         target._started = True
         loop = _get_loop()
         # Hold the body coroutine via a weakref so ``__del__`` can fire
         # while the greenlet is suspended and other references are
-        # released.
-        target._task = loop.create_task(_body(weakref.ref(target), args, kwargs))
+        # released. Pass the pre-resolved ``run`` in: our ``run``
+        # property raises ``AttributeError`` once ``_started`` is set,
+        # so ``_body`` cannot re-resolve after this point.
+        target._task = loop.create_task(_body(weakref.ref(target), run, args, kwargs))
         return
 
     # Already suspended. Stash the wake-up payload and resolve the
@@ -610,7 +723,7 @@ def _switch_to(
     # Validate the target has something to run on its first switch.
     # Both ``switch`` and ``throw`` raise ``AttributeError`` here in
     # upstream when the target has no ``run``.
-    if not target._started and target._run is None:
+    if not target._started and _resolve_run(target) is None:
         raise AttributeError("run")
 
     # Allocate our own resume future *before* waking the target so that
@@ -625,8 +738,20 @@ def _switch_to(
     else:
         _wake(target, args=args, kwargs=kwargs)
 
-    # We are no longer the running greenlet.
-    _current = target
+    # NOTE: ``_current`` is intentionally NOT updated here. ``_current``
+    # names the greenlet whose wasm stack is currently executing Python
+    # code. We are still on ``src``'s wasm stack until ``_run_sync``
+    # actually yields it, so ``src`` must remain current. The resuming
+    # greenlet is responsible for updating ``_current`` when its wasm
+    # stack takes over (either in :func:`_body` for a fresh start, or
+    # in :func:`_switch_to` post-``_run_sync`` for a resumed suspend).
+    #
+    # This matters because a destructor firing between the ``_wake``
+    # call and ``_run_sync`` (e.g. via ``del src`` dropping the last
+    # reference to a suspended greenlet other than ``src``) will call
+    # :func:`getcurrent`; that must still report ``src`` so the
+    # destructor's ``current is self`` guard behaves as upstream.
+    #
     # Replace ``src`` and ``target`` with weakrefs so this suspended
     # frame does NOT keep the greenlets alive. The C-extension allows
     # a suspended greenlet to be GC'd (firing its destructor, which
@@ -635,24 +760,29 @@ def _switch_to(
     # framework-owned objects (asyncio task / loop), not our own code.
     src_ref = weakref.ref(src)
     del src, target
-
     # Park ourselves until somebody resolves my_future. ``run_sync``
     # suspends the wasm stack via JSPI; the JS event loop continues to
     # turn so other greenlets / asyncio tasks make progress.
     _run_sync(my_future)
     del my_future
 
-    # We're back. Reinstate ourselves as the current greenlet and
-    # consume the wake-up payload.
     src = src_ref()
     if src is None:
         # We were garbage-collected while parked. The destructor
         # already arranged the appropriate teardown; just unwind.
         return None
-    _current = src
+    # We're back. Consume the wake-up payload BEFORE updating
+    # ``_current``. Reassigning ``_current`` decrefs the outgoing
+    # value; if that triggers a destructor (upstream: throwing
+    # ``GreenletExit`` into a suspended greenlet), the destructor
+    # may reenter :func:`_switch_to` recursively and clobber our
+    # ``_pending_value``. Snapshot the payload first, and clear the
+    # slots before touching ``_current`` so the recursive path sees
+    # a clean state.
     payload = src._pending_value
     src._pending_value = None
     src._resume_future = None
+    _current = src
     if isinstance(payload, _Throw):
         raise payload.exc
     return payload
