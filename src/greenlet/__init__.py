@@ -44,8 +44,10 @@ import asyncio
 import gc
 import sys
 import weakref
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from pyodide.ffi import run_sync as _run_sync  # type: ignore
 
 # Tracks whether a cycle-collection pass is currently in progress.
 # Populated via ``gc.callbacks`` below. ``__del__`` consults this to
@@ -57,14 +59,14 @@ class _GCProbe:
     gc_active: bool = False
 
     @classmethod
-    def _gc_probe_callback(cls, phase: str, info: dict) -> None:  # noqa: ARG001
+    def callback(cls, phase: str, _info: dict) -> None:  # noqa: ARG001
         if phase == "start":
             cls.gc_active = True
         elif phase == "stop":
             cls.gc_active = False
 
 
-gc.callbacks.append(_gc_probe_callback)
+gc.callbacks.append(_GCProbe.callback)
 
 __all__ = [
     "__version__",
@@ -117,18 +119,7 @@ class error(Exception):
     """Internal greenlet error (e.g. invalid switch)."""
 
 
-# ---------------------------------------------------------------------------
-# run_sync import
-# ---------------------------------------------------------------------------
 
-try:
-    from pyodide.ffi import run_sync as _run_sync  # type: ignore
-except ImportError:  # pragma: no cover - allow import outside Pyodide
-    def _run_sync(awaitable):  # type: ignore[no-redef]
-        raise error(
-            "greenlet (Pyodide port) requires pyodide.ffi.run_sync, "
-            "which is only available inside Pyodide."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -154,11 +145,27 @@ def _get_loop() -> asyncio.AbstractEventLoop:
 
 # Sentinel that travels with a wake-up to indicate the resumed greenlet
 # should re-raise an exception rather than receive a value.
+@dataclass(slots=True)
 class _Throw:
-    __slots__ = ("exc",)
+    exc: BaseException
 
-    def __init__(self, exc: BaseException) -> None:
-        self.exc = exc
+
+# Structural type passed to ``sys.unraisablehook`` when an exception
+# escapes from within a greenlet's ``__del__``. Matches the attribute
+# surface CPython's own C-level unraisable machinery constructs
+# (``exc_type``, ``exc_value``, ``exc_traceback``, ``err_msg``,
+# ``object``). Constructed inside an ``except`` block: pulls the
+# in-flight exception out of ``sys.exc_info()``.
+class _Unraisable:
+    __slots__ = ("exc_type", "exc_value", "exc_traceback", "err_msg", "object")
+
+    def __init__(self, obj: Any, err_msg: Optional[str] = None) -> None:
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        self.exc_type = exc_type
+        self.exc_value = exc_value
+        self.exc_traceback = exc_traceback
+        self.err_msg = err_msg
+        self.object = obj
 
 
 def _resolve_run(target: "greenlet") -> Optional[Callable[..., Any]]:
@@ -447,6 +454,9 @@ class greenlet:
         # mark the greenlet dead and skip the switch. This means the greenlet's
         # ``finally`` clauses will NOT run for cycle-collected greenlets. This
         # actually happens in upstream greenlet too.
+        #
+        # Note: it seems like can_run_sync() might be appropriate here instead
+        # but it isn't.
         if _GCProbe.gc_active or sys.is_finalizing():
             self._dead = True
             self._started = True
@@ -460,12 +470,11 @@ class greenlet:
             return
         if current is self:
             return
-        # Upstream temporarily reparents the dying greenlet to the
-        # killer (the current greenlet) for the duration of the kill,
-        # then restores the original parent once the body has exited.
-        # That way the GreenletExit handler observes the killer as its
-        # parent and any unhandled exceptions propagate to the killer
-        # rather than the original parent.
+        # Temporarily reparents the dying greenlet to the the current greenlet
+        # for the duration of the kill, then restores the original parent once
+        # the body has exited. That way the GreenletExit handler observes the
+        # current greenlet as its parent and any unhandled exceptions propagate
+        # to the current greenlet rather than the original parent.
         original_parent = self._parent
         if current is not original_parent:
             try:
@@ -477,27 +486,16 @@ class greenlet:
         try:
             try:
                 _switch_to(self, (), {}, throw=GreenletExit())
-            except BaseException:  # noqa: BLE001 - swallow, like upstream
+            except BaseException:  # noqa: BLE001 - swallow
                 # Any exception that escapes here is unraisable; route
-                # it through ``sys.unraisablehook`` to match upstream.
+                # it through ``sys.unraisablehook``
                 try:
                     hook = sys.unraisablehook
-                except AttributeError:  # pragma: no cover
+                except AttributeError:
                     return
-
-                class _Unraisable:
-                    __slots__ = ("exc_type", "exc_value", "exc_traceback",
-                                 "err_msg", "object")
-                ur = _Unraisable()
-                exc = sys.exc_info()
-                ur.exc_type = exc[0]
-                ur.exc_value = exc[1]
-                ur.exc_traceback = exc[2]
-                ur.err_msg = None
-                ur.object = self
                 try:
-                    hook(ur)
-                except Exception:  # pragma: no cover
+                    hook(_Unraisable(self))
+                except Exception:
                     pass
         finally:
             if original_parent is not None:
