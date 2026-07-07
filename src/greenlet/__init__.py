@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 greenlet for Pyodide.
 
@@ -44,8 +43,9 @@ import asyncio
 import gc
 import sys
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any
 
 from pyodide.ffi import run_sync as _run_sync  # type: ignore
 
@@ -54,6 +54,7 @@ from pyodide.ffi import run_sync as _run_sync  # type: ignore
 # avoid re-entering the greenlet switching machinery from cycle GC:
 # JSPI's ``run_sync`` returns spuriously when nested inside a cycle
 # collection pass, which would otherwise deadlock finalization.
+
 
 class _GCProbe:
     gc_active: bool = False
@@ -119,9 +120,6 @@ class error(Exception):
     """Internal greenlet error (e.g. invalid switch)."""
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # Module-level state
 #
@@ -130,8 +128,8 @@ class error(Exception):
 # greenlet.
 # ---------------------------------------------------------------------------
 
-_current: "greenlet | None" = None
-_main: "greenlet | None" = None
+_current: greenlet | None = None
+_main: greenlet | None = None
 
 
 def _get_loop() -> asyncio.AbstractEventLoop:
@@ -159,7 +157,7 @@ class _Throw:
 class _Unraisable:
     __slots__ = ("exc_type", "exc_value", "exc_traceback", "err_msg", "object")
 
-    def __init__(self, obj: Any, err_msg: Optional[str] = None) -> None:
+    def __init__(self, obj: Any, err_msg: str | None = None) -> None:
         exc_type, exc_value, exc_traceback = sys.exc_info()
         self.exc_type = exc_type
         self.exc_value = exc_value
@@ -168,7 +166,7 @@ class _Unraisable:
         self.object = obj
 
 
-def _resolve_run(target: "greenlet") -> Optional[Callable[..., Any]]:
+def _resolve_run(target: greenlet) -> Callable[..., Any] | None:
     """Look up the callable to run for a freshly-starting greenlet.
 
     Upstream reads the ``run`` attribute at the first switch via normal
@@ -189,7 +187,7 @@ def _resolve_run(target: "greenlet") -> Optional[Callable[..., Any]]:
     * anything a subclass ``__getattribute__`` chooses to return.
     """
     try:
-        result = getattr(target, "run")
+        result = target.run
     except AttributeError:
         return None
     if result is None:
@@ -197,7 +195,7 @@ def _resolve_run(target: "greenlet") -> Optional[Callable[..., Any]]:
     return result
 
 
-def _pack_switch_value(args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+def _pack_switch_value(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     """Encode the value a paused switch() should return.
 
     Mirrors upstream greenlet (see ``operator<<=`` in
@@ -244,7 +242,7 @@ class greenlet:
         "_gr_frame",
     )
 
-    def __new__(cls, *args: Any, **kwargs: Any) -> "greenlet":
+    def __new__(cls, *args: Any, **kwargs: Any) -> greenlet:
         # Initialise all slots in ``__new__`` so that subclasses that
         # override ``__init__`` without calling ``super().__init__``
         # still get a fully-formed instance. Upstream does the same in
@@ -270,8 +268,8 @@ class greenlet:
 
     def __init__(
         self,
-        run: Optional[Callable[..., Any]] = None,
-        parent: "greenlet | None" = None,
+        run: Callable[..., Any] | None = None,
+        parent: greenlet | None = None,
     ) -> None:
         self._run = run
         if parent is None:
@@ -320,7 +318,7 @@ class greenlet:
     # ---- properties ---------------------------------------------------
 
     @property
-    def run(self) -> Optional[Callable[..., Any]]:
+    def run(self) -> Callable[..., Any] | None:
         # Upstream hides ``run`` once the greenlet has started, both
         # while alive and after death.
         if self._started:
@@ -330,29 +328,24 @@ class greenlet:
     @run.setter
     def run(self, value: Callable[..., Any]) -> None:
         if self._started:
-            raise AttributeError(
-                "run cannot be set after the start of the greenlet"
-            )
+            raise AttributeError("run cannot be set after the start of the greenlet")
         self._run = value
 
     @property
-    def parent(self) -> "greenlet | None":
+    def parent(self) -> greenlet | None:
         return self._parent
 
     @parent.setter
-    def parent(self, value: "greenlet") -> None:
+    def parent(self, value: greenlet) -> None:
         if not isinstance(value, greenlet):
             # Match upstream's error message verbatim.
             raise TypeError(
-                "GreenletChecker: Expected any type of greenlet, not "
-                + type(value).__name__
+                "GreenletChecker: Expected any type of greenlet, not " + type(value).__name__
             )
         if self._main:
-            raise AttributeError(
-                "cannot set the parent of a main greenlet"
-            )
+            raise AttributeError("cannot set the parent of a main greenlet")
         # Detect cycles: walk the new parent chain.
-        cur: "greenlet | None" = value
+        cur: greenlet | None = value
         while cur is not None:
             if cur is self:
                 raise ValueError("cyclic parent chain")
@@ -394,7 +387,7 @@ class greenlet:
     # ---- core operations ----------------------------------------------
 
     @staticmethod
-    def getcurrent() -> "greenlet":
+    def getcurrent() -> greenlet:
         """Class-method form of :func:`greenlet.getcurrent`."""
         return getcurrent()
 
@@ -413,9 +406,7 @@ class greenlet:
 
         if isinstance(typ, BaseException):
             if val is not None:
-                raise TypeError(
-                    "instance exception may not have a separate value"
-                )
+                raise TypeError("instance exception may not have a separate value")
             exc = typ
         elif isinstance(typ, type) and issubclass(typ, BaseException):
             if val is None:
@@ -427,15 +418,10 @@ class greenlet:
             else:
                 exc = typ(val)
         else:
-            raise TypeError(
-                "exceptions must be classes, or instances, not "
-                + type(typ).__name__
-            )
+            raise TypeError("exceptions must be classes, or instances, not " + type(typ).__name__)
         if tb is not None:
             if not isinstance(tb, _types.TracebackType):
-                raise TypeError(
-                    "throw() third argument must be a traceback object"
-                )
+                raise TypeError("throw() third argument must be a traceback object")
             exc = exc.with_traceback(tb)
         return _switch_to(self, (), {}, throw=exc)
 
@@ -509,7 +495,7 @@ class greenlet:
 # ---------------------------------------------------------------------------
 
 
-def _ensure_main() -> "greenlet":
+def _ensure_main() -> greenlet:
     """Lazily promote the current call stack to the main greenlet."""
     global _main, _current
     if _main is None:
@@ -530,10 +516,10 @@ def _ensure_main() -> "greenlet":
 
 
 async def _body(
-    self_ref: "weakref.ref[greenlet]",
-    run: Optional[Callable[..., Any]],
-    args: Tuple[Any, ...],
-    kwargs: Dict[str, Any],
+    self_ref: weakref.ref[greenlet],
+    run: Callable[..., Any] | None,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
 ) -> None:
     """Drive the user-supplied ``run`` for a freshly-started greenlet.
 
@@ -558,7 +544,7 @@ async def _body(
     # closure that references it explicitly.
     del self
     result: Any = None
-    exc: Optional[BaseException] = None
+    exc: BaseException | None = None
     try:
         if run is None:
             # An unstarted greenlet was woken to receive a "fall-off"
@@ -600,10 +586,10 @@ async def _body(
 
 
 def _wake(
-    target: "greenlet",
-    args: Tuple[Any, ...] = (),
-    kwargs: Optional[Dict[str, Any]] = None,
-    exc: Optional[BaseException] = None,
+    target: greenlet,
+    args: tuple[Any, ...] = (),
+    kwargs: dict[str, Any] | None = None,
+    exc: BaseException | None = None,
 ) -> None:
     """Make ``target`` runnable with the given resume payload.
 
@@ -669,10 +655,10 @@ def _wake(
 
 
 def _switch_to(
-    target: "greenlet",
-    args: Tuple[Any, ...],
-    kwargs: Dict[str, Any],
-    throw: Optional[BaseException],
+    target: greenlet,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    throw: BaseException | None,
 ) -> Any:
     """Implementation of ``greenlet.switch`` / ``greenlet.throw``."""
     global _current
@@ -779,7 +765,7 @@ def _switch_to(
 # ---------------------------------------------------------------------------
 
 
-def getcurrent() -> "greenlet":
+def getcurrent() -> greenlet:
     """Return the currently executing greenlet."""
     _ensure_main()
     assert _current is not None

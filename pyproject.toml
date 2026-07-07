@@ -15,3 +15,25 @@ testpaths = ["tests"]
 markers = [
     "pyodide: test requires the Pyodide runtime (uses pyodide.ffi)",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["tests/upstream"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+]
+ignore = [
+    "E501",  # line-too-long (formatter handles it; long comments are OK)
+    "B008",  # function calls in default args (asyncio patterns)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]  # allow ``assert False`` in tests

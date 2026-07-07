@@ -23,9 +23,7 @@ def _running_in_pyodide() -> bool:
 def pytest_collection_modifyitems(config, items):
     if _running_in_pyodide():
         return
-    skip_pyodide = pytest.mark.skip(
-        reason="requires Pyodide runtime (pyodide.ffi.run_sync)"
-    )
+    skip_pyodide = pytest.mark.skip(reason="requires Pyodide runtime (pyodide.ffi.run_sync)")
     for item in items:
         if "pyodide" in item.keywords:
             item.add_marker(skip_pyodide)

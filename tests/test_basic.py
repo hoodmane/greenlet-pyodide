@@ -8,10 +8,8 @@ import asyncio
 import pytest
 
 import greenlet
-from greenlet import GreenletExit
-from greenlet import getcurrent
+from greenlet import GreenletExit, getcurrent
 from greenlet import greenlet as G
-
 
 # ---------------------------------------------------------------------------
 # module surface
@@ -386,7 +384,9 @@ def test_run_is_hidden_after_start_and_cannot_be_reset():
 
 
 def test_run_visible_before_first_switch():
-    f = lambda: 1
+    def f():
+        return 1
+
     g = G(f)
     assert g.run is f
     g.run = lambda: 2  # still settable before start
