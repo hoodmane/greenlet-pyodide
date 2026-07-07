@@ -8,39 +8,34 @@ A pure-Python re-implementation of the greenlet API on top of
 How it works
 ============
 
-In CPython, greenlet uses platform-specific assembly to swap C stacks.
-On WebAssembly there is no portable way to do that, but Pyodide exposes
-JavaScript Promise Integration (JSPI) via :func:`pyodide.ffi.run_sync`,
-which lets a synchronous Python frame *block* on an awaitable while the
-JS event loop continues to run.
+In CPython, greenlet uses platform-specific assembly to swap C stacks. Pyodide
+exposes JavaScript Promise Integration (JSPI) via :func:`pyodide.ffi.run_sync`,
+which lets a synchronous Python frame *block* on an awaitable while the JS event
+loop continues to run.
 
 We exploit that as follows:
 
-* Each greenlet's body runs as an :class:`asyncio.Task`. The body
-  itself is plain synchronous Python code; the only points at which it
-  yields control are calls to :meth:`greenlet.switch` (or
-  :meth:`~greenlet.throw`).
+* Each greenlet's body runs as an :class:`asyncio.Task`. The body itself is
+  plain synchronous Python code; the only points at which it yields control are
+  calls to :meth:`greenlet.switch` (or :meth:`~greenlet.throw`).
 * While a greenlet is suspended, it is parked on a per-greenlet
-  :class:`asyncio.Future` via ``run_sync``. The wasm stack at that
-  point is suspended by JSPI; the JS event loop keeps running.
-* To switch from greenlet *A* to greenlet *B*, *A* resolves *B*'s
-  resume future (or starts *B*'s task on the first switch) and then
-  immediately calls ``run_sync`` on its own freshly-created future.
-  ``run_sync`` returns once another greenlet later resolves *A*'s
-  future.
+  :class:`asyncio.Future` via ``run_sync``. The wasm stack at that point is
+  suspended by JSPI; the JS event loop keeps running.
+* To switch from greenlet *A* to greenlet *B*, *A* resolves *B*'s resume future
+  (or starts *B*'s task on the first switch) and then immediately calls
+  ``run_sync`` on its own freshly-created future. ``run_sync`` returns once
+  another greenlet later resolves *A*'s future.
 
-The "main" greenlet is implicit: the very first call into greenlet
-machinery promotes the currently-executing call stack into a
-``MainGreenlet`` instance that other greenlets descend from.
+The "main" greenlet is implicit: the very first call into greenlet machinery
+promotes the currently-executing call stack into a ``MainGreenlet`` instance
+that other greenlets descend from.
 
 Limitations
 -----------
-* Threads are not supported (Pyodide is single-threaded). Each call to
-  :func:`getcurrent` returns the single main greenlet.
-* Tracing hooks (:func:`settrace`, :func:`gettrace`) are accepted but
-  never invoked.
-* The C-API capsule ``_C_API`` is not exported; native extensions
-  linking against the greenlet C API will not work in Pyodide.
+* Tracing hooks (:func:`settrace`, :func:`gettrace`) are accepted but never
+  invoked.
+* The C-API capsule ``_C_API`` is not exported; native extensions linking
+  against the greenlet C API will not work in Pyodide.
 """
 
 from __future__ import annotations
@@ -57,14 +52,16 @@ from typing import Any, Callable, Dict, Optional, Tuple
 # avoid re-entering the greenlet switching machinery from cycle GC:
 # JSPI's ``run_sync`` returns spuriously when nested inside a cycle
 # collection pass, which would otherwise deadlock finalization.
-_gc_active: list = [False]
 
+class _GCProbe:
+    gc_active: bool = False
 
-def _gc_probe_callback(phase: str, info: dict) -> None:  # noqa: ARG001
-    if phase == "start":
-        _gc_active[0] = True
-    elif phase == "stop":
-        _gc_active[0] = False
+    @classmethod
+    def _gc_probe_callback(cls, phase: str, info: dict) -> None:  # noqa: ARG001
+        if phase == "start":
+            cls.gc_active = True
+        elif phase == "stop":
+            cls.gc_active = False
 
 
 gc.callbacks.append(_gc_probe_callback)
@@ -438,28 +435,19 @@ class greenlet:
     # ---- finalization --------------------------------------------------
 
     def __del__(self) -> None:
-        # Upstream throws ``GreenletExit`` into a suspended greenlet at
-        # finalization so its ``finally`` clauses run. We do the same
-        # by switching into it with a GreenletExit. This only fires if
-        # the greenlet was started, hasn't died yet, and the body's
-        # frame released its self-reference (see :func:`_body`, which
-        # holds a weakref).
-        # If ``__init__`` raised before fully initialising, the slots
-        # we need won't be set; bail out silently in that case.
+        # Switch into task with a ``GreenletExit`` if we can. This only fires if
+        # the greenlet was started, hasn't died yet, and the body's frame
+        # released its self-reference.
         if not getattr(self, "_started", False):
             return
         if getattr(self, "_dead", True):
             return
         # When ``__del__`` is invoked from Python's cycle GC pass, our
-        # ``_switch_to`` machinery cannot yield the wasm stack safely:
-        # JSPI's ``run_sync`` returns spuriously in that context (the
-        # exact interaction between cycle GC and PyodideFuture done
-        # callbacks is not fully understood). Rather than deadlock,
-        # simply mark the greenlet dead and skip the switch. This
-        # means the greenlet's ``finally`` clauses will NOT run for
-        # cycle-collected greenlets, which matches the documented
-        # "test_finalizer_crash" caveat in the upstream test suite.
-        if _gc_active[0] or sys.is_finalizing():
+        # ``_switch_to`` machinery cannot yield. Rather than deadlock, simply
+        # mark the greenlet dead and skip the switch. This means the greenlet's
+        # ``finally`` clauses will NOT run for cycle-collected greenlets. This
+        # actually happens in upstream greenlet too.
+        if _GCProbe.gc_active or sys.is_finalizing():
             self._dead = True
             self._started = True
             self._run = None
@@ -468,7 +456,7 @@ class greenlet:
         # Avoid running into our own destructor recursively.
         try:
             current = getcurrent()
-        except Exception:  # pragma: no cover - shutdown
+        except Exception:
             return
         if current is self:
             return
