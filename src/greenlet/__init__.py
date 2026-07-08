@@ -167,30 +167,10 @@ class _Unraisable:
 
 
 def _resolve_run(target: greenlet) -> Callable[..., Any] | None:
-    """Look up the callable to run for a freshly-starting greenlet.
-
-    Upstream reads the ``run`` attribute at the first switch via normal
-    Python attribute access -- that means subclass ``__getattribute__``
-    hooks run and can have side effects (e.g. recursively switching
-    into the greenlet before it has officially "started"). We do the
-    same by calling :func:`getattr` on ``target``. If ``run`` is
-    absent (raises :class:`AttributeError`) we return ``None`` so the
-    caller can raise ``AttributeError("run")`` at the switch site,
-    matching upstream.
-
-    The base-class ``run`` property returns ``self._run`` when the
-    greenlet has not yet started, so ``getattr(target, 'run')``
-    naturally picks up:
-
-    * a ``run=`` keyword passed to ``__init__`` (stored in ``_run``),
-    * a subclass override that shadows the property (method / attr),
-    * anything a subclass ``__getattribute__`` chooses to return.
-    """
+    """Look up the callable to run for a freshly-starting greenlet."""
     try:
         result = target.run
     except AttributeError:
-        return None
-    if result is None:
         return None
     return result
 

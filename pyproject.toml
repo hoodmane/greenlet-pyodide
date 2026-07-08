@@ -1,6 +1,6 @@
 [project]
 name = "greenlet-pyodide"
-version = "0.0.0.dev0"
+version = "0.1.0"
 description = "Pyodide port of greenlet on top of pyodide.ffi.run_sync"
 requires-python = ">=3.10"
 

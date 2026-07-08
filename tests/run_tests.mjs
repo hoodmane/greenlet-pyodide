@@ -1,7 +1,10 @@
 // Run the greenlet pytest suite inside Pyodide.
 //
 // Usage:
-//   node --experimental-wasm-stack-switching tests/run_tests.mjs [pytest args...]
+//   node tests/run_tests.mjs [pytest args...]
+//
+// Requires Node.js >= 26 (JSPI is enabled by default; on older Node
+// versions you need ``--experimental-wasm-stack-switching``).
 
 import { loadPyodide } from "pyodide";
 import { fileURLToPath } from "node:url";
